@@ -1,0 +1,25 @@
+{
+  "configurations": [
+    {
+      "name": "Win32",
+      "includePath": [
+        "${workspaceFolder}/.vscode/arduino-includes",
+        "${workspaceFolder}/medchill_firmware/medchill_firmware"
+      ],
+      "defines": [
+        "ARDUINO=10813",
+        "ESP32"
+      ],
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "intelliSenseMode": "windows-msvc-x64",
+      "browse": {
+        "path": [
+          "${workspaceFolder}/.vscode/arduino-includes",
+          "${workspaceFolder}/medchill_firmware/medchill_firmware"
+        ]
+      }
+    }
+  ],
+  "version": 4
+}
