@@ -1,5 +1,5 @@
 // ============================================================
-// MedChill AI — Phase 2: Wi-Fi Access & Firebase Connection
+// MedChill AI — Phase 2: Complete Relay & Power Sync Framework
 // Target: ESP32 DevKit V1 (WROOM-32 Stable Framework)
 // Core Compatibility: Arduino ESP32 Core v3.0+ Fully Compliant
 // ============================================================
@@ -9,21 +9,22 @@
 #include <Wire.h>
 #include <U8g2lib.h>
 #include <FirebaseESP32.h>
+#include <Adafruit_INA219.h>  // New Power Sensor Framework Injection
 
 // ── NETWORK CONFIGURATION CREDENTIALS ───────────────────────
-#define WIFI_SSID         "YOUR_WIFI_NAME"         // Replace with your Wi-Fi router network name
-#define WIFI_PASSWORD     "YOUR_WIFI_PASSWORD"     // Replace with your Wi-Fi password
+#define WIFI_SSID         "Abc"         // Replace with your Wi-Fi name
+#define WIFI_PASSWORD     "123456789"     // Replace with your Wi-Fi password
 
-#define FIREBASE_HOST     "med-chill-ai-default-rtdb.asia-southeast1.firebasedatabase.app" // Your database endpoint
-#define FIREBASE_AUTH     "geHmbDr87vj5SQMRk0w0YK15WtTgwiZrh7940gY9" // Your database token secret
+#define FIREBASE_HOST     "med-chill-ai-default-rtdb.asia-southeast1.firebasedatabase.app"
+#define FIREBASE_AUTH     "geHmbDr87vj5SQMRk0w0YK15WtTgwiZrh7940gY9"
 
 // ── Pin Configuration Map ───────────────────────────────────
 #define DHT_A_PIN         4       // Zone A DHT22 (Vaccines)
 #define DHT_B_PIN         15      // Zone B DHT22 (Tablets)
 #define DHTTYPE           DHT22  
 
-#define SDA_PIN           21      // SH1106 OLED SDA
-#define SCL_PIN           22      // SH1106 OLED SCL
+#define SDA_PIN           21      // Shared SH1106 OLED & INA219 SDA
+#define SCL_PIN           22      // Shared SH1106 OLED & INA219 SCL
 
 #define GREEN_LED         2       // Normal State Indicator
 #define RED_LED           12      // Alert State Indicator
@@ -32,16 +33,20 @@
 #define SENSOR_LEFT_PIN   17      // Left Door Reed Switch
 #define SENSOR_RIGHT_PIN  16      // Right Door Reed Switch
 
+#define RELAY_A           25      // IN1 - Zone A Peltier Switch
+#define RELAY_B           26      // IN2 - Zone B Peltier Switch
+
 // ── Intervals & Parameters ──────────────────────────────────
-#define ALARM_FREQUENCY   3000    // 3 kHz buzzer frequency
+#define ALARM_FREQUENCY   3000    
 #define SAMPLE_INTERVAL   3000    // Read climate metrics every 3 seconds
 #define CLOUD_INTERVAL    10000   // Sync telemetry to Firebase every 10 seconds
 
+// Initialize Hardware Structures
 DHT dhtA(DHT_A_PIN, DHTTYPE);
 DHT dhtB(DHT_B_PIN, DHTTYPE);
 U8G2_SH1106_128X64_NONAME_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
+Adafruit_INA219 ina219;        // Power monitor driver link
 
-// Firebase Core Engine Interfaces
 FirebaseData firebaseData;
 FirebaseConfig fbConfig;
 FirebaseAuth fbAuth;
@@ -56,41 +61,62 @@ bool alarmState = false;
 float tempA = 0.0, humA = 0.0;
 float tempB = 0.0, humB = 0.0;
 
+// Power Telemetry Storage Registers
+float voltage_V = 0.0;
+float current_mA = 0.0;
+float power_mW = 0.0;
+
+// Tracking strings for localized feedback loops
+String relayA_State = "OFF";
+String relayB_State = "OFF";
+
 // Edge AI Rolling Memory Buffer 
-float edgeInputBuffer[12];        // Holds sequence data points
-int edgeBufferIdx = 0;            // Array index pointer
-bool edgeBufferFull = false;      // Armed when 12 slots are populated
+float edgeInputBuffer[12];
+int edgeBufferIdx = 0;
+bool edgeBufferFull = false;
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== MedChill AI: Phase 2 Cloud Initialization ===");
+  Serial.println("\n=== MedChill AI: Phase 2 Complete Relay & Power Bus ===");
 
-  // Configure I/O Map
+  // Configure Local I/O Platform
   pinMode(GREEN_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
   pinMode(SENSOR_LEFT_PIN, INPUT_PULLUP);
   pinMode(SENSOR_RIGHT_PIN, INPUT_PULLUP);
+  pinMode(RELAY_A, OUTPUT);
+  pinMode(RELAY_B, OUTPUT);
 
-  // Initialize core audio architecture drivers (Core v3.0+ compliant)
+  // High Polarity Safe State Forced Initialization (Active-LOW: HIGH = Relay Switch Open/OFF)
+  digitalWrite(RELAY_A, HIGH);
+  digitalWrite(RELAY_B, HIGH);
+
+  // Initialize Core Audio Framework
   ledcAttach(BUZZER_PIN, ALARM_FREQUENCY, 8);
 
-  // Start localized hardware assets
+  // Initialize Local Bus Interconnect links
   dhtA.begin();
   dhtB.begin();
   Wire.begin(SDA_PIN, SCL_PIN);
   oled.begin();
 
-  // Render initial display status
+  // Initialize INA219 Sensor Over Shared I2C Bus Row
+  if (!ina219.begin()) {
+    Serial.println(">> WARNING: INA219 Power Chip Not Detected on I2C Row!");
+  } else {
+    Serial.println(">> INA219 Power Telemetry Engine Connected Successfully.");
+  }
+
+  // Visual Display Feedback
   oled.clearBuffer();
   oled.setFont(u8g2_font_6x10_tr);
   oled.drawStr(5, 20, "MedChill AI Monitor");
   oled.drawStr(5, 45, "Connecting Wi-Fi...");
   oled.sendBuffer();
 
-  // ── ESTABLISH WIRELESS HANDSHAKE ──
+  // Establish Wi-Fi Connection
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi Network");
   int networkAttempts = 0;
   while (WiFi.status() != WL_CONNECTED && networkAttempts < 30) {
     delay(500);
@@ -99,32 +125,40 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n>> Wireless Link Active! IP Address: " + WiFi.localIP().toString());
+    Serial.println("\n>> Network Verified! IP: " + WiFi.localIP().toString());
   } else {
-    Serial.println("\n>> Wi-Fi Timeout. Operating in offline failsafe mode.");
+    Serial.println("\n>> Wi-Fi Handshake Timeout. Running offline.");
   }
 
-  // ── INITIALIZE FIREBASE ENGINE ──
+  // Link Firebase Database Core
   fbConfig.host = FIREBASE_HOST;
   fbConfig.signer.tokens.legacy_token = FIREBASE_AUTH;
   Firebase.begin(&fbConfig, &fbAuth);
   Firebase.reconnectWiFi(true);
 
-  Serial.println(">> Cloud Synchronization Engine Online.");
+  Serial.println(">> Cloud Telemetry Matrix Active.");
   Serial.println("------------------------------------------------");
 }
 
 void loop() {
   unsigned long currentMillis = millis();
 
-  // ── 1. CLIMATE SAMPLING ──
+  // ── 1. ENVIRONMENT & POWER SAMPLING MATRIX ──
   if (currentMillis - lastSensorRead >= SAMPLE_INTERVAL) {
     lastSensorRead = currentMillis;
+    
+    // Read Climate Inputs
     tempA = dhtA.readTemperature();
     humA  = dhtA.readHumidity();
     tempB = dhtB.readTemperature();
     humB  = dhtB.readHumidity();
 
+    // Read Power Monitoring Metrics from INA219
+    voltage_V = ina219.getBusVoltage_V();
+    current_mA = ina219.getCurrent_mA();
+    power_mW = ina219.getPower_mW();
+
+    // Cache historical variables safely for True Edge AI steps
     if (!isnan(tempA)) {
       edgeInputBuffer[edgeBufferIdx % 12] = tempA;
       edgeBufferIdx++;
@@ -132,38 +166,61 @@ void loop() {
         edgeBufferFull = true;
       }
     }
+    
+    // Threshold Control Loops: Switch ON if temp hits or passes 30°C boundary
+    if (!isnan(tempA)) {
+      if (tempA >= 30.0) { digitalWrite(RELAY_A, LOW);  relayA_State = "ON"; }  // Switch Clo
+      else               { digitalWrite(RELAY_A, HIGH); relayA_State = "OFF"; } // Switch Open
+    }
+    if (!isnan(tempB)) {
+      if (tempB >= 30.0) { digitalWrite(RELAY_B, LOW);  relayB_State = "ON"; }
+      else               { digitalWrite(RELAY_B, HIGH); relayB_State = "OFF"; }
+    }
   }
 
-  // ── 2. ASYNCHRONOUS FIREBASE CLOUD STREAMING (Every 10 seconds) ──
+  // ── 2. EXACT FIREBASE CLOUD PACKET TREE SYNC (Every 10 seconds) ──
   if (currentMillis - lastCloudSync >= CLOUD_INTERVAL) {
     lastCloudSync = currentMillis;
     
     if (WiFi.status() == WL_CONNECTED) {
-      // Stream parameters out sequentially to maintain lower power levels
+      // /power node matching your exact database tree structure
+      Firebase.setFloat(firebaseData, "/power/voltage", voltage_V);
+      Firebase.setFloat(firebaseData, "/power/current_mA", current_mA);
+      Firebase.setFloat(firebaseData, "/power/power_mW", power_mW);
+      
+      // /system node matching your exact database tree structure
+      int reed1 = digitalRead(SENSOR_LEFT_PIN);  
+      int reed2 = digitalRead(SENSOR_RIGHT_PIN); 
+      bool generalDoorBreach = ((reed1 == HIGH) || (reed2 == HIGH)); // Matches your pull-up logic
+      
+      Firebase.setBool(firebaseData, "/system/doorOpen", generalDoorBreach);
+      Firebase.setString(firebaseData, "/system/lidStatus", generalDoorBreach ? "open" : "closed");
+      Firebase.setInt(firebaseData, "/system/localUptime", (int)(currentMillis / 1000));
+      Firebase.setBool(firebaseData, "/system/sleepMode", false);
+      
+      // /zoneA & /zoneB nodes mapping exact historic elements
       Firebase.setFloat(firebaseData, "/zoneA/temperature", tempA);
       Firebase.setFloat(firebaseData, "/zoneA/humidity", humA);
+      Firebase.setInt(firebaseData, "/zoneA/pwm", (relayA_State == "ON") ? 255 : 0); // Preserves chart mappings
+      
       Firebase.setFloat(firebaseData, "/zoneB/temperature", tempB);
       Firebase.setFloat(firebaseData, "/zoneB/humidity", humB);
-      Firebase.setString(firebaseData, "/system/lidStatus", (digitalRead(SENSOR_LEFT_PIN) == HIGH || digitalRead(SENSOR_RIGHT_PIN) == HIGH) ? "open" : "closed");
-      Firebase.setInt(firebaseData, "/system/localUptime", (int)(currentMillis / 1000));
+      Firebase.setInt(firebaseData, "/zoneB/pwm", (relayB_State == "ON") ? 255 : 0);
       
-      Serial.println("[CLOUD SYNC] Telemetry packets streamed to Realtime Database.");
+      Serial.println("[CLOUD SYNC] Complete telemetry tree synced to Firebase.");
     }
   }
 
-  // ── 3. DOORS POLARITY PARSING (INPUT_PULLUP) ──
+  // ── 3. LOCAL DOOR BREACH HANDLING ──
   int reed1 = digitalRead(SENSOR_LEFT_PIN);  
   int reed2 = digitalRead(SENSOR_RIGHT_PIN); 
-
   int leftDoorOpen  = (reed1 == HIGH) ? 0 : 1;
   int rightDoorOpen = (reed2 == HIGH) ? 1 : 0;
   bool generalDoorBreach = (leftDoorOpen || rightDoorOpen);
 
-  // ── 4. SAFETY NOTIFICATION LOGIC ──
   if (generalDoorBreach) {
     digitalWrite(GREEN_LED, LOW);
     digitalWrite(RED_LED, HIGH); 
-    
     if (currentMillis - lastAlarmToggle >= 250) {
       lastAlarmToggle = currentMillis;
       alarmState = !alarmState;
@@ -186,34 +243,32 @@ void loop() {
     
     if (currentMillis - lastAlarmToggle >= SAMPLE_INTERVAL) {
       lastAlarmToggle = currentMillis;
-      Serial.printf("[LOCAL SAFE] ZoneA: %.1fC | ZoneB: %.1fC | Wi-Fi: %s\n", 
-                    tempA, tempB, (WiFi.status() == WL_CONNECTED) ? "CONNECTED" : "DISCONNECTED");
+      Serial.printf("[SYSTEM ACTIVE] V:%.2fV | I:%.1fmA | P:%.1fmW\n", voltage_V, current_mA, power_mW);
     }
   }
 
-  // ── 5. RENDER GUI DISPLAY FRAME ──
+  // ── 4. RENDER GUI DISPLAY FRAME ──
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.drawStr(0, 7, "MedChill AI Monitor");
   oled.drawLine(0, 9, 128, 9);
 
-  char bufA[32], bufB[32], doorBuf[32], netBuf[32];
+  char bufA[32], bufB[32], powerBuf[32], netBuf[32];
   
   if (isnan(tempA)) sprintf(bufA, "Zone A: SENSOR FAULT");
-  else sprintf(bufA, "Zone A: %.1fC  H:%.0f%%", tempA, humA);
-  oled.drawStr(0, 22, bufA);
+  else sprintf(bufA, "R1:%s  A:%.1fC H:%.0f%%", relayA_State.c_str(), tempA, humA);
+  oled.drawStr(0, 20, bufA);
 
   if (isnan(tempB)) sprintf(bufB, "Zone B: SENSOR FAULT");
-  else sprintf(bufB, "Zone B: %.1fC  H:%.0f%%", tempB, humB);
-  oled.drawStr(0, 38, bufB);
+  else sprintf(bufB, "R2:%s  B:%.1fC H:%.0f%%", relayB_State.c_str(), tempB, humB);
+  oled.drawStr(0, 33, bufB);
 
-  sprintf(doorBuf, "Doors -> L:%s  R:%s", leftDoorOpen ? "OPEN" : "OK", rightDoorOpen ? "OPEN" : "OK");
-  oled.drawStr(0, 50, doorBuf);
+  // Render live wattage consumption directly onto screen center line
+  sprintf(powerBuf, "Load -> %.2fV  %.1fW", voltage_V, (power_mW / 1000.0));
+  oled.drawStr(0, 46, powerBuf);
 
-  oled.drawLine(0, 53, 128, 53);
-  
-  sprintf(netBuf, "NET: %s", (WiFi.status() == WL_CONNECTED) ? "ONLINE ★" : "OFFLINE Failsafe");
-  oled.drawStr(0, 63, netBuf);
+  sprintf(netBuf, "Doors:%s | NET:ONLINE ★", generalDoorBreach ? "OPEN" : "OK");
+  oled.drawStr(0, 60, netBuf);
 
   oled.sendBuffer();
 }
