@@ -1,0 +1,10 @@
+# Ignore build files
+build/
+bin/
+.build/
+*.hex
+*.bin
+
+# Ignore secrets
+config.json
+private_tokens.h
