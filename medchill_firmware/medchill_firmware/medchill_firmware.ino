@@ -1,5 +1,5 @@
 // ============================================================
-// MedChill AI — Phase 3: Complete Edge AI & Relay Inference
+// MedChill AI — Phase 4: Smart Hysteresis Thermal Management
 // Target: ESP32 DevKit V1 (WROOM-32 Stable Framework)
 // Core Compatibility: Arduino ESP32 Core v3.0+ Fully Compliant
 // ============================================================
@@ -10,7 +10,7 @@
 #include <U8g2lib.h>
 #include <FirebaseESP32.h>
 #include <Adafruit_INA219.h>
-#include "medchill_model_data.h"  // Local parameter links
+#include "medchill_model_data.h" 
 
 // ── NETWORK CONFIGURATION CREDENTIALS ───────────────────────
 #define WIFI_SSID         "Abc" 
@@ -24,7 +24,7 @@
 #define DHT_B_PIN         15      
 #define DHTTYPE           DHT22   
 
-#define SDA_PIN           21      // Shared I2C Bus Row
+#define SDA_PIN           21      
 #define SCL_PIN           22      
 
 #define GREEN_LED         2       
@@ -41,6 +41,15 @@
 #define ALARM_FREQUENCY   3000    
 #define SAMPLE_INTERVAL   3000    // Read climate metrics every 3 seconds
 #define CLOUD_INTERVAL    10000   // Sync telemetry to Firebase every 10 seconds
+
+// ── Phase 4: Smart Hysteresis Operational Bands ────────────
+// Zone A Profile (User Target: 2°C to 20°C)
+#define ZONE_A_MAX_THRESH  20.0f   // Turn cooling ON if it hits/exceeds 20°C
+#define ZONE_A_MIN_THRESH  2.0f    // Shut cooling OFF once safely chilled down to 2°C
+
+// Zone B Profile (User Target: 20°C to 30°C)
+#define ZONE_B_MAX_THRESH  30.0f   // Turn cooling ON if it hits/exceeds 30°C
+#define ZONE_B_MIN_THRESH  20.0f   // Shut cooling OFF once safely chilled down to 20°C
 
 // Initialize Hardware Drivers
 DHT dhtA(DHT_A_PIN, DHTTYPE);
@@ -74,12 +83,12 @@ String relayB_State = "OFF";
 float edgeInputBuffer[12];
 int edgeBufferIdx = 0;
 bool edgeBufferFull = false;
-float predictedTempA = 0.0; // Stores the output of the offline predictive engine
+float predictedTempA = 0.0; 
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== MedChill AI: Phase 3 Native Edge AI Active ===");
+  Serial.println("\n=== MedChill AI: Phase 4 Hysteresis Engine Active ===");
 
   // Configure Local I/O Platform
   pinMode(GREEN_LED, OUTPUT);
@@ -169,9 +178,8 @@ void loop() {
       }
     }
     
-    // Execute Native Edge Predictive Inference once window is complete
+    // Execute Native Edge Predictive Inference
     if (edgeBufferFull && !isnan(tempA)) {
-      // Calculates the mathematical trend slope across the 12-slot data sequence
       float sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
       for (int i = 0; i < 12; i++) {
         int chronologicalIdx = (edgeBufferIdx + i) % 12;
@@ -183,25 +191,39 @@ void loop() {
         sumX2 += x * x;
       }
       float trendSlope = (12 * sumXY - sumX * sumY) / (12 * sumX2 - sumX * sumX);
-      
-      // Projects the trend slope 30 minutes (600 processing cycles) into the future
       predictedTempA = tempA + (trendSlope * 588.0f);
       
-      // Boundary clamping to safeguard against sudden measurement glitches
       if (predictedTempA > 60.0f) predictedTempA = 60.0f;
       if (predictedTempA < 0.0f)  predictedTempA = 0.0f;
     } else {
-      predictedTempA = tempA; // Fallback while rolling cache populates
+      predictedTempA = tempA; 
     }
     
-    // Active-LOW Core Threshold Control Loops (Turns cooling ON at >= 30.0°C)
+    // ── SMART HYSTERESIS LOGIC IMPLEMENTATION ──
+    // Zone A Control Loop (Target Window: 2.0°C to 20.0°C)
     if (!isnan(tempA)) {
-      if (tempA >= 30.0) { digitalWrite(RELAY_A, LOW);  relayA_State = "ON"; }  
-      else               { digitalWrite(RELAY_A, HIGH); relayA_State = "OFF"; } 
+      if (tempA >= ZONE_A_MAX_THRESH) { 
+        digitalWrite(RELAY_A, LOW);   // Active-LOW: Turn Peltier ON
+        relayA_State = "ON"; 
+      }  
+      else if (tempA <= ZONE_A_MIN_THRESH) { 
+        digitalWrite(RELAY_A, HIGH);  // Active-LOW: Turn Peltier OFF
+        relayA_State = "OFF"; 
+      }
+      // If temp is between 2.0°C and 20.0°C, it stays in its previous state
     }
+
+    // Zone B Control Loop (Target Window: 20.0°C to 30.0°C)
     if (!isnan(tempB)) {
-      if (tempB >= 30.0) { digitalWrite(RELAY_B, LOW);  relayB_State = "ON"; }
-      else               { digitalWrite(RELAY_B, HIGH); relayB_State = "OFF"; }
+      if (tempB >= ZONE_B_MAX_THRESH) { 
+        digitalWrite(RELAY_B, LOW);   // Active-LOW: Turn Peltier ON
+        relayB_State = "ON"; 
+      }  
+      else if (tempB <= ZONE_B_MIN_THRESH) { 
+        digitalWrite(RELAY_B, HIGH);  // Active-LOW: Turn Peltier OFF
+        relayB_State = "OFF"; 
+      }
+      // If temp is between 20.0°C and 30.0°C, it stays in its previous state
     }
   }
 
@@ -223,6 +245,7 @@ void loop() {
       Firebase.setInt(firebaseData, "/system/localUptime", (int)(currentMillis / 1000));
       Firebase.setBool(firebaseData, "/system/sleepMode", false);
       
+      // Sync parameters matching your chart engine
       Firebase.setFloat(firebaseData, "/zoneA/temperature", tempA);
       Firebase.setFloat(firebaseData, "/zoneA/humidity", humA);
       Firebase.setInt(firebaseData, "/zoneA/pwm", (relayA_State == "ON") ? 255 : 0);
@@ -232,7 +255,7 @@ void loop() {
       Firebase.setFloat(firebaseData, "/zoneB/humidity", humB);
       Firebase.setInt(firebaseData, "/zoneB/pwm", (relayB_State == "ON") ? 255 : 0);
       
-      Serial.println("[CLOUD SYNC] Telemetry tree + Edge AI prediction synced to Firebase.");
+      Serial.println("[CLOUD SYNC] Telemetry tree + Hysteresis vectors pushed to Firebase.");
     }
   }
 
@@ -268,15 +291,15 @@ void loop() {
     
     if (currentMillis - lastAlarmToggle >= SAMPLE_INTERVAL) {
       lastAlarmToggle = currentMillis;
-      Serial.printf("[SYSTEM ACTIVE] Real A: %.1fC | AI Forecast: %.1fC | Power: %.1fW\n", 
-                    tempA, predictedTempA, (power_mW / 1000.0));
+      Serial.printf("[HYSTERESIS ACTIVE] A:%.1fC (R1:%s) | B:%.1fC (R2:%s) | Load:%.1fW\n", 
+                    tempA, relayA_State.c_str(), tempB, relayB_State.c_str(), (power_mW / 1000.0));
     }
   }
 
-  // ── 4. RENDER PHASE 3 DASHBOARD GUI DISPLAY FRAME ──
+  // ── 4. RENDER PHASE 4 DASHBOARD GUI DISPLAY FRAME ──
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 7, "MedChill AI Monitor");
+  oled.drawStr(0, 7, "MedChill AI Core v4");
   oled.drawLine(0, 9, 128, 9);
 
   char bufA[32], bufB[32], aiBuf[32], powerBuf[32];
